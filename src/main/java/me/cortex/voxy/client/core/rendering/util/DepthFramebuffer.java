@@ -1,7 +1,9 @@
 package me.cortex.voxy.client.core.rendering.util;
 
+import me.cortex.voxy.client.core.gl.Capabilities;
 import me.cortex.voxy.client.core.gl.GlFramebuffer;
 import me.cortex.voxy.client.core.gl.GlTexture;
+import me.cortex.voxy.common.util.ThreadUtils;
 import org.lwjgl.system.MemoryStack;
 
 import static org.lwjgl.opengl.ARBDirectStateAccess.nglClearNamedFramebufferfv;
@@ -41,11 +43,31 @@ public class DepthFramebuffer {
         return this.depthType == GL_DEPTH24_STENCIL8?GL_DEPTH_STENCIL_ATTACHMENT: GL_DEPTH_ATTACHMENT;
     }
 
-    public void clear(float depth) {
+ public void clear(float depth) {
+    if (!Capabilities.INSTANCE.isIntel || !ThreadUtils.isWindows) {
         try (var stack = MemoryStack.stackPush()) {
-            nglClearNamedFramebufferfv(this.framebuffer.id, GL_DEPTH, 0, stack.nfloat(depth));
+            nglClearNamedFramebufferfv(
+                    this.framebuffer.id,
+                    GL_DEPTH,
+                    0,
+                    stack.nfloat(depth)
+            );
         }
+        return;
     }
+
+    int previousFramebuffer = glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
+
+    try {
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, this.framebuffer.id);
+
+        try (var stack = MemoryStack.stackPush()) {
+            nglClearBufferfv(GL_DEPTH, 0, stack.nfloat(depth));
+        }
+    } finally {
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, previousFramebuffer);
+    }
+}
 
     public void clearStencil(int to) {
         try (var stack = MemoryStack.stackPush()) {
