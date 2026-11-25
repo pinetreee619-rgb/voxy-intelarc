@@ -3,6 +3,9 @@
 
 layout(local_size_x = 128) in;
 
+// Number of quads backed by Voxy's shared 16-bit terrain index buffer.
+const uint MAX_MERGED_QUADS = 16380u;
+
 #define DRAW_BUFFER_BINDING 1
 #define DRAW_COUNT_BUFFER_BINDING 2
 #define SECTION_METADATA_BUFFER_BINDING 3
@@ -57,9 +60,6 @@ void main() {
     uint detail = extractDetail(meta);
     ivec3 ipos = extractPosition(meta);
 
-    vec3 cornerPos = vec3(((ipos<<detail)-baseSectionPos)<<5)-cameraSubPos;
-
-
     uint dat = visibilityData[sectionId];
 
     //if the section was visible this frame
@@ -80,26 +80,6 @@ void main() {
 
         positionBuffer[drawId] = extractRawPos(meta);
         uvec4 counts = meta.b;
-
-        //TODO implicit command merging
-        uint msk = 0;
-        msk |= uint(((counts.y      &0xFFFFu)!=0) && (relative.y>-1))<<0;
-        msk |= uint((((counts.y>>16)&0xFFFFu)!=0) && (relative.y<1 ))<<1;
-        msk |= uint(((counts.z      &0xFFFFu)!=0) && (relative.z>-1))<<2;
-        msk |= uint((((counts.z>>16)&0xFFFFu)!=0) && (relative.z<1 ))<<3;
-        msk |= uint(((counts.w      &0xFFFFu)!=0) && (relative.x>-1))<<4;
-        msk |= uint((((counts.w>>16)&0xFFFFu)!=0) && (relative.x<1 ))<<5;
-
-        msk |= uint(((counts.x>>16)&0xFFFFu)!=0)<<6;
-
-
-        uint cmdCnt = bitCount(msk);
-        uint cmdPtr = atomicAdd(opaqueDrawCount, cmdCnt);
-
-        uint tCmdPtr = 0;
-        if (renderTemporally) {
-            tCmdPtr = atomicAdd(temporalOpaqueDrawCount, cmdCnt) + TEMPORAL_OFFSET;
-        }
 
         //TODO: make totalQuads also have temporal amount
         #ifdef HAS_STATISTICS
@@ -123,96 +103,61 @@ void main() {
         }
         ptr += count;
 
-        //Double sided quads
-        count = (counts.x>>16)&0xFFFFu;
-        if (count != 0) {
-            writeCmd(cmdPtr++, drawId, ptr, count);
-            if (renderTemporally) {
-                writeCmd(tCmdPtr++, drawId, ptr, count);
-            }
-            #ifdef HAS_STATISTICS
-            totalQuads += count;
-            #endif
-        }
-        ptr += count;
+        // Buckets appear in this order in the section's geometry buffer.
+        uint opaqueCounts[7] = uint[7](
+            counts.x >> 16, counts.y & 0xFFFFu, counts.y >> 16,
+            counts.z & 0xFFFFu, counts.z >> 16, counts.w & 0xFFFFu, counts.w >> 16
+        );
+        uint visibleBuckets = 1u; // Double sided
+        visibleBuckets |= uint(relative.y >= 0) << 1; // Down
+        visibleBuckets |= uint(relative.y <= 0) << 2; // Up
+        visibleBuckets |= uint(relative.z >= 0) << 3; // North
+        visibleBuckets |= uint(relative.z <= 0) << 4; // South
+        visibleBuckets |= uint(relative.x >= 0) << 5; // West
+        visibleBuckets |= uint(relative.x <= 0) << 6; // East
 
-        //Down
-        count = (counts.y)&0xFFFFu;
-        if (((msk&(1u<<0))!=0)) {
-            writeCmd(cmdPtr++, drawId, ptr, count);
-            if (renderTemporally) {
-                writeCmd(tCmdPtr++, drawId, ptr, count);
+        uvec2 ranges[7];
+        uint rangeCount = 0u;
+        uint rangeStart = ptr;
+        uint rangeQuads = 0u;
+        for (int bucket = 0; bucket < 7; ++bucket) {
+            uint bucketQuads = opaqueCounts[bucket];
+            if (bucketQuads != 0u && (visibleBuckets & (1u << bucket)) != 0u) {
+                // Empty buckets are contiguous. A non-empty culled bucket leaves a gap.
+                if (rangeQuads == 0u) {
+                    rangeStart = ptr;
+                } else if (rangeStart + rangeQuads != ptr || rangeQuads + bucketQuads > MAX_MERGED_QUADS) {
+                    ranges[rangeCount++] = uvec2(rangeStart, rangeQuads);
+                    rangeStart = ptr;
+                    rangeQuads = 0u;
+                }
+                rangeQuads += bucketQuads;
+                #ifdef HAS_STATISTICS
+                totalQuads += bucketQuads;
+                #endif
             }
-            #ifdef HAS_STATISTICS
-            totalQuads += count;
-            #endif
-        }
-        ptr += count;
 
-        //Up
-        count = (counts.y>>16)&0xFFFFu;
-        if ((msk&(1u<<1))!=0) {
-            writeCmd(cmdPtr++, drawId, ptr, count);
-            if (renderTemporally) {
-                writeCmd(tCmdPtr++, drawId, ptr, count);
-            }
-            #ifdef HAS_STATISTICS
-            totalQuads += count;
-            #endif
+            ptr += bucketQuads;
         }
-        ptr += count;
 
-        //North
-        count = (counts.z)&0xFFFFu;
-        if ((msk&(1u<<2))!=0) {
-            writeCmd(cmdPtr++, drawId, ptr, count);
-            if (renderTemporally) {
-                writeCmd(tCmdPtr++, drawId, ptr, count);
-            }
-            #ifdef HAS_STATISTICS
-            totalQuads += count;
-            #endif
+        if (rangeQuads != 0u) {
+            ranges[rangeCount++] = uvec2(rangeStart, rangeQuads);
         }
-        ptr += count;
 
-        //South
-        count = (counts.z>>16)&0xFFFFu;
-        if ((msk&(1u<<3))!=0) {
-            writeCmd(cmdPtr++, drawId, ptr, count);
+        if (rangeCount != 0u) {
+            uint cmdPtr = atomicAdd(opaqueDrawCount, rangeCount);
+            uint temporalPtr = 0u;
             if (renderTemporally) {
-                writeCmd(tCmdPtr++, drawId, ptr, count);
+                temporalPtr = atomicAdd(temporalOpaqueDrawCount, rangeCount) + TEMPORAL_OFFSET;
             }
-            #ifdef HAS_STATISTICS
-            totalQuads += count;
-            #endif
-        }
-        ptr += count;
-
-        //West
-        count = (counts.w)&0xFFFFu;
-        if ((msk&(1u<<4))!=0) {
-            writeCmd(cmdPtr++, drawId, ptr, count);
-            if (renderTemporally) {
-                writeCmd(tCmdPtr++, drawId, ptr, count);
+            for (uint i = 0u; i < rangeCount; ++i) {
+                uvec2 range = ranges[i];
+                writeCmd(cmdPtr + i, drawId, range.x, range.y);
+                if (renderTemporally) {
+                    writeCmd(temporalPtr + i, drawId, range.x, range.y);
+                }
             }
-            #ifdef HAS_STATISTICS
-            totalQuads += count;
-            #endif
         }
-        ptr += count;
-
-        //East
-        count = (counts.w>>16)&0xFFFFu;
-        if ((msk&(1u<<5))!=0) {
-            writeCmd(cmdPtr++, drawId, ptr, count);
-            if (renderTemporally) {
-                writeCmd(tCmdPtr++, drawId, ptr, count);
-            }
-            #ifdef HAS_STATISTICS
-            totalQuads += count;
-            #endif
-        }
-        ptr += count;
 
         #ifdef HAS_STATISTICS
         atomicAdd(quadCounts[detail], totalQuads);
