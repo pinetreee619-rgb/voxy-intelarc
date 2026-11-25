@@ -44,11 +44,13 @@ public class DepthFramebuffer {
         return this.depthType == GL_DEPTH24_STENCIL8?GL_DEPTH_STENCIL_ATTACHMENT: GL_DEPTH_ATTACHMENT;
     }
 
+    private static boolean useBoundDepthClear() {
+        return Capabilities.INSTANCE.isIntel && ThreadUtils.isWindows;
+    }
+
     public void clear(float depth) {
-        if (!Capabilities.INSTANCE.isIntel || !ThreadUtils.isWindows) {
-            try (var stack = MemoryStack.stackPush()) {
-                nglClearNamedFramebufferfv(this.framebuffer.id, GL_DEPTH, 0, stack.nfloat(depth));
-            }
+        if (!useBoundDepthClear()) {
+            this.clearNamed(depth);
             return;
         }
 
@@ -56,11 +58,31 @@ public class DepthFramebuffer {
         int previousFramebuffer = glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
         try {
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, this.framebuffer.id);
-            try (var stack = MemoryStack.stackPush()) {
-                nglClearBufferfv(GL_DEPTH, 0, stack.nfloat(depth));
-            }
+            clearBound(depth);
         } finally {
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, previousFramebuffer);
+        }
+    }
+
+    public void bindAndClear(float depth) {
+        if (useBoundDepthClear()) {
+            this.bind();
+            clearBound(depth);
+        } else {
+            this.clearNamed(depth);
+            this.bind();
+        }
+    }
+
+    private void clearNamed(float depth) {
+        try (var stack = MemoryStack.stackPush()) {
+            nglClearNamedFramebufferfv(this.framebuffer.id, GL_DEPTH, 0, stack.nfloat(depth));
+        }
+    }
+
+    private static void clearBound(float depth) {
+        try (var stack = MemoryStack.stackPush()) {
+            nglClearBufferfv(GL_DEPTH, 0, stack.nfloat(depth));
         }
     }
 

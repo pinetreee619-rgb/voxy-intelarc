@@ -70,11 +70,6 @@ public class BoundRenderer {
     }
 
     private void renderInner(Viewport<?> viewport, float renderDistanceBlocks, int chunkCount) {
-        viewport.depthBoundingBuffer.clear(this.properties.inverseClearDepth());
-        if (chunkCount == 0) {
-            return;
-        }
-
         long ptr = UploadStream.INSTANCE.upload(this.uniformBuffer, 0, 128);
         long matPtr = ptr; ptr += 4*4*4;
 
@@ -111,7 +106,7 @@ public class BoundRenderer {
         }
 
         glBindVertexArray(GlVertexArray.STATIC_VAO);
-        viewport.depthBoundingBuffer.bind();
+        viewport.depthBoundingBuffer.bindAndClear(this.properties.inverseClearDepth());
         this.rasterShader.bind();
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, SharedIndexBuffer.INSTANCE_BB_BYTE.id());
         if (this.pipeline != null) this.pipeline.bindUniforms();//shader TAA

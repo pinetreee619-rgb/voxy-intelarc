@@ -12,10 +12,38 @@ layout(binding = IO_BUFFER, std430) buffer InputBuffer {
     uvec4[] ioCount;
 };
 
+#import <voxy:util/prefixsum/shared_scan.glsl>
+#import <voxy:util/prefixsum/translucent_dispatch.glsl>
+
+shared uint subgroupTotals16[WORK_SIZE / 16];
+shared uint subgroupOffsets16[WORK_SIZE / 16];
+
 shared uint warpPrefixSum[8];//Warps are 32, tricks require full warp
 
 void main() {
-    if (gl_SubgroupSize == 32) {
+    prepareTranslucentDispatch();
+    if (gl_SubgroupSize == 16u) {
+        // Assign distance bins in subgroup order, independent of local invocation ordering.
+        uint lane = gl_SubgroupInvocationID;
+        uint group = gl_SubgroupID;
+        uint bin = group * 16u + lane;
+        uvec4 bins = ioCount[bin];
+        uvec4 offsets = uvec4(0u, bins.x, bins.x + bins.y, bins.x + bins.y + bins.z);
+        uint total = offsets.w + bins.w;
+        uint subgroupOffset = subgroupExclusiveAdd(total);
+
+        if (lane == 15u) {
+            subgroupTotals16[group] = subgroupOffset + total;
+        }
+        barrier();
+
+        if (group == 0u) {
+            subgroupOffsets16[lane] = subgroupExclusiveAdd(subgroupTotals16[lane]);
+        }
+        barrier();
+
+        ioCount[bin] = offsets + subgroupOffset + subgroupOffsets16[group];
+    } else if (gl_SubgroupSize == 32u) {
         #ifdef IS_INTEL
         uint subgroupId = gl_LocalInvocationID.x>>5;
         #else
@@ -60,7 +88,7 @@ void main() {
         //Add the computed sum across all threads and warps
         count += warpPrefixSum[subgroupId];
         ioCount[gid] = count;
-    } else {
+    } else if (gl_SubgroupSize == 64u) {
         #ifdef IS_INTEL
         uint subgroupId = gl_LocalInvocationID.x>>6;
         #else
@@ -120,5 +148,10 @@ void main() {
         //Add the computed sum across all threads and warps
         count += warpPrefixSum[subgroupId];
         ioCount[gid] = count;
+    } else {
+        uint bin = gl_LocalInvocationID.x;
+        uvec4 bins = ioCount[bin];
+        uvec4 offsets = uvec4(0u, bins.x, bins.x + bins.y, bins.x + bins.y + bins.z);
+        ioCount[bin] = offsets + sharedPrefixSumExclusive(offsets.w + bins.w);
     }
 }
