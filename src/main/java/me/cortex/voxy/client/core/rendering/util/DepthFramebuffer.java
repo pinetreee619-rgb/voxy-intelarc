@@ -1,12 +1,15 @@
 package me.cortex.voxy.client.core.rendering.util;
 
+import me.cortex.voxy.client.core.gl.Capabilities;
 import me.cortex.voxy.client.core.gl.GlFramebuffer;
 import me.cortex.voxy.client.core.gl.GlTexture;
+import me.cortex.voxy.common.util.ThreadUtils;
 import org.lwjgl.system.MemoryStack;
 
 import static org.lwjgl.opengl.ARBDirectStateAccess.nglClearNamedFramebufferfv;
 import static org.lwjgl.opengl.ARBDirectStateAccess.nglClearNamedFramebufferiv;
 import static org.lwjgl.opengl.GL11C.GL_DEPTH;
+import static org.lwjgl.opengl.GL11C.glGetInteger;
 import static org.lwjgl.opengl.GL14.GL_DEPTH_COMPONENT24;
 import static org.lwjgl.opengl.GL30C.*;
 
@@ -42,8 +45,22 @@ public class DepthFramebuffer {
     }
 
     public void clear(float depth) {
-        try (var stack = MemoryStack.stackPush()) {
-            nglClearNamedFramebufferfv(this.framebuffer.id, GL_DEPTH, 0, stack.nfloat(depth));
+        if (!Capabilities.INSTANCE.isIntel || !ThreadUtils.isWindows) {
+            try (var stack = MemoryStack.stackPush()) {
+                nglClearNamedFramebufferfv(this.framebuffer.id, GL_DEPTH, 0, stack.nfloat(depth));
+            }
+            return;
+        }
+
+        // Intel's Windows driver can leave the reverse-Z depth buffer uncleared with DSA.
+        int previousFramebuffer = glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
+        try {
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, this.framebuffer.id);
+            try (var stack = MemoryStack.stackPush()) {
+                nglClearBufferfv(GL_DEPTH, 0, stack.nfloat(depth));
+            }
+        } finally {
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, previousFramebuffer);
         }
     }
 
